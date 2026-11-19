@@ -125,7 +125,7 @@ type AccessAttemptStatus = 'pending' | 'failed' | 'approved' | 'revoked';
 // configure their Telegram numeric ID securely in the hosting environment.
 // This prevents the admin panel from being locked to an old account after a
 // bot migration or redeploy.
-const MAIN_ADMIN_ID = String(process.env.MAIN_ADMIN_ID || '7581137308').trim();
+let MAIN_ADMIN_ID = String(process.env.MAIN_ADMIN_ID || '7581137308').trim();
 
 interface AccessCodeState {
   code: string;
@@ -241,6 +241,7 @@ interface PortalAuthSession {
 }
 
 interface PersistedBotSettings {
+  mainAdminId?: string;
   globalDefaultQuality: VideoQualityOption;
   preferFullSingleVideo: boolean;
   accessCode: AccessCodeState;
@@ -324,6 +325,7 @@ function createFreshAccessCode(durationKey: AccessDurationKey = '24h', avoidCode
 }
 
 let botSettings: PersistedBotSettings = {
+  mainAdminId: MAIN_ADMIN_ID,
   globalDefaultQuality: '480p',
   preferFullSingleVideo: true,
   accessCode: createFreshAccessCode('24h'),
@@ -429,6 +431,7 @@ function parseTelegramFloodWaitMs(errText: string): number {
 
 function saveBotSettings() {
   try {
+    botSettings.mainAdminId = MAIN_ADMIN_ID;
     const existingVault = decodeRuntimeVault(botSettings.hfCloud.runtimeVault) || {};
     const mergedToken = isValidTelegramBotToken(process.env.TELEGRAM_BOT_TOKEN)
       ? process.env.TELEGRAM_BOT_TOKEN!.trim()
@@ -501,6 +504,11 @@ function loadBotSettings() {
   try {
     if (fs.existsSync(BOT_CONFIG_PATH)) {
       const parsed = JSON.parse(fs.readFileSync(BOT_CONFIG_PATH, 'utf8')) as Partial<PersistedBotSettings>;
+      const persistedOwner = String(parsed.mainAdminId || '').trim();
+      if (persistedOwner && isValidTelegramChatId(persistedOwner)) {
+        MAIN_ADMIN_ID = persistedOwner;
+        botSettings.mainAdminId = persistedOwner;
+      }
       if (parsed.globalDefaultQuality) {
         botSettings.globalDefaultQuality = parsed.globalDefaultQuality;
       }
@@ -937,6 +945,42 @@ function removeStaffRole(targetId: string, removedBy: string): { ok: boolean; er
   return { ok: true };
 }
 
+function transferMainAdmin(targetId: string, transferredBy: string): { ok: boolean; error?: string; previousId?: string } {
+  const cleanTarget = String(targetId || '').trim();
+  const previousId = MAIN_ADMIN_ID;
+  if (!isValidTelegramChatId(cleanTarget)) {
+    return { ok: false, error: 'Invalid Telegram User ID.' };
+  }
+  if (!isMainAdmin(transferredBy)) {
+    return { ok: false, error: `Only current Main Admin (${MAIN_ADMIN_ID}) can transfer ownership.` };
+  }
+  if (cleanTarget === previousId) {
+    return { ok: false, error: 'That user is already the Main Admin.' };
+  }
+
+  // Keep the old owner as an admin to prevent accidental lockout, while the
+  // new owner receives root authority and all existing admin/developer rights.
+  const oldEntry = botSettings.accessAttempts[previousId];
+  botSettings.staffRoles[previousId] = {
+    userId: previousId,
+    role: 'admin',
+    name: oldEntry?.firstName || 'Previous Main Admin',
+    username: oldEntry?.username,
+    appointedBy: cleanTarget,
+    appointedAt: new Date().toISOString(),
+  };
+  delete botSettings.staffRoles[cleanTarget];
+  MAIN_ADMIN_ID = cleanTarget;
+  grantUserAccess(cleanTarget, 'permanent', previousId, {
+    firstName: botSettings.accessAttempts[cleanTarget]?.firstName || 'Main Admin',
+    username: botSettings.accessAttempts[cleanTarget]?.username,
+    activatedWithCode: 'MAIN_ADMIN',
+  });
+  saveBotSettings();
+  addBotLog('SYSTEM', previousId, `Transferred Main Admin ownership to ${cleanTarget}`);
+  return { ok: true, previousId };
+}
+
 function buildUserApprovalKeyboard(targetId: string) {
   return {
     inline_keyboard: [
@@ -951,6 +995,16 @@ function buildUserApprovalKeyboard(targetId: string) {
       ],
     ],
   };
+}
+
+function getApprovalRecipientIds(): string[] {
+  return Array.from(
+    new Set(
+      [MAIN_ADMIN_ID, ...Object.values(botSettings.staffRoles || {}).map((staff) => staff.userId)].filter((id) =>
+        isValidTelegramChatId(String(id))
+      )
+    )
+  );
 }
 
 function recordAccessAttempt(params: {
@@ -988,18 +1042,18 @@ function recordAccessAttempt(params: {
       lastAttemptAlertAtByUser.set(cleanId, Date.now());
       const badge = params.status === 'pending' ? '📩 APPROVAL REQUEST' : '🚨 FAILED ACCESS ATTEMPT';
       const uHandle = nextEntry.username ? ` (@${nextEntry.username})` : '';
-      sendTelegramTextMessage(
-        MAIN_ADMIN_ID,
+      const approvalText =
         `${badge}\n` +
-          `━━━━━━━━━━━━━━━━━━━━━━\n` +
-          `👤 User: ${nextEntry.firstName}${uHandle}\n` +
-          `🆔 User ID: \`${cleanId}\`\n` +
-          `🔢 Total Tries: ${nextEntry.attemptsCount}\n` +
-          (nextEntry.lastInputPreview ? `💬 Input: \`${nextEntry.lastInputPreview}\`\n` : '') +
-          `📝 Reason: ${nextEntry.reason || 'No valid daily access code'}\n\n` +
-          `👇 Neeche se direct Approve, Revoke, Admin ya Developer banayein:`,
-        buildUserApprovalKeyboard(cleanId)
-      ).catch(() => {});
+        `━━━━━━━━━━━━━━━━━━━━━━\n` +
+        `👤 User: ${nextEntry.firstName}${uHandle}\n` +
+        `🆔 User ID: \`${cleanId}\`\n` +
+        `🔢 Total Tries: ${nextEntry.attemptsCount}\n` +
+        (nextEntry.lastInputPreview ? `💬 Input: \`${nextEntry.lastInputPreview}\`\n` : '') +
+        `📝 Reason: ${nextEntry.reason || 'No valid daily access code'}\n\n` +
+        `👇 Neeche se direct Approve, Revoke, Admin ya Developer banayein:`;
+      for (const recipientId of getApprovalRecipientIds()) {
+        sendTelegramTextMessage(recipientId, approvalText, buildUserApprovalKeyboard(cleanId)).catch(() => {});
+      }
     }
   }
 }
@@ -8954,6 +9008,7 @@ const BOT_COMMANDS_LIST = [
   { command: 'addadmin', description: '👑 Appoint Bot Admin (Main Admin Only)' },
   { command: 'adddev', description: '🛠 Appoint Bot Developer (Main Admin Only)' },
   { command: 'removeadmin', description: '⬇️ Demote Admin / Developer (Main Admin Only)' },
+  { command: 'setowner', description: '🔁 Transfer Main Admin Ownership (Main Admin Only)' },
   { command: 'admins', description: '🛡 List All Appointed Admins & Developers' },
   { command: 'audit', description: '🐞 Run Full A2Z Bug Bounty & Speed Audit' },
   { command: 'only', description: '🎯 Download ONLY Selected Video Numbers (/only 12 or 128,134)' },
@@ -9067,7 +9122,7 @@ function buildAdminPanelPayload(viewerId: string) {
     `👑 StreamBridge Control Center (/admin)\n` +
     `━━━━━━━━━━━━━━━━━━━━━━\n` +
     `🛡️ Your Role: ${role.toUpperCase()} (${viewerId})\n` +
-    `👑 Main Admin ID: \`${MAIN_ADMIN_ID}\` (Immutable)\n` +
+    `👑 Main Admin ID: \`${MAIN_ADMIN_ID}\` (Transferable by /setowner)\n` +
     `🔑 Today's Daily Code: \`${activeCode.code}\` (${remHours}h ${remMins}m left)\n` +
     `👮 Staff Appointed: ${staffList.filter((s) => s.role === 'admin').length} Admin(s) · ${staffList.filter((s) => s.role === 'developer').length} Developer(s)\n` +
     `✅ Approved Users: ${approvedList.length} · 🚨 Failed/Pending Tries: ${failedPendingCount}\n` +
@@ -9078,7 +9133,9 @@ function buildAdminPanelPayload(viewerId: string) {
     `• \`/revoke <user_id>\` · \`/newcode\`\n` +
     `• \`/addadmin <user_id> [name]\` (Main Admin)\n` +
     `• \`/adddev <user_id> [name]\` (Main Admin)\n` +
-    `• \`/removeadmin <user_id>\` · \`/audit\``;
+    `• \`/removeadmin <user_id>\` · \`/setowner <user_id>\`\n` +
+    `• Approval requests are sent to Main Admin + all appointed staff\n` +
+    `• \`/audit\``;
 
   const replyMarkup = {
     inline_keyboard: [
@@ -14465,6 +14522,35 @@ async function pollTelegramBotUpdates() {
           } else {
             await sendTelegramTextMessage(chatId, `⚠️ ${resRev.error}`);
           }
+          continue;
+        }
+
+        if (baseCmd === '/setowner' || baseCmd === '/transferowner') {
+          if (!isMainAdmin(chatId, senderId)) {
+            await sendTelegramTextMessage(chatId, `🚫 Only current Main Admin (\`${MAIN_ADMIN_ID}\`) can transfer ownership.`);
+            continue;
+          }
+          const targetId = text.replace(/^\/(?:setowner|transferowner)(?:@\S+)?/i, '').trim().split(/\s+/)[0] || '';
+          if (!isValidTelegramChatId(targetId)) {
+            await sendTelegramTextMessage(chatId, 'Usage: `/setowner <user_id>`');
+            continue;
+          }
+          const previousOwner = MAIN_ADMIN_ID;
+          const transfer = transferMainAdmin(targetId, senderId);
+          if (!transfer.ok) {
+            await sendTelegramTextMessage(chatId, `⚠️ ${transfer.error}`);
+            continue;
+          }
+          addBotLog('SYSTEM', senderId, `Transferred Main Admin ownership to ${targetId}`);
+          await sendTelegramTextMessage(
+            chatId,
+            `✅ Main Admin ownership transferred to \`${targetId}\`.\n` +
+              `Previous owner \`${previousOwner}\` remains an Admin to prevent lockout.`
+          );
+          await sendTelegramTextMessage(
+            targetId,
+            `👑 You are now the Main Admin of this bot.\nUse /admin to manage approvals, users, Admins and Developers.`
+          ).catch(() => {});
           continue;
         }
 
