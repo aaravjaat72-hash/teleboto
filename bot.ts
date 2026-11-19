@@ -11080,7 +11080,9 @@ async function processDownloadJob(job: DownloadJob, preDownloadOnly = false): Pr
       // A separate upload destination lets a different Userbot account send
       // large files to a shared group/channel instead of resolving the
       // requester's personal numeric peer (which may lack an access_hash).
-      const configuredUploadChat = (process.env.TELEGRAM_UPLOAD_CHAT_ID || '').trim();
+      const configuredUploadChat = (
+        process.env.TELEGRAM_UPLOAD_CHAT_ID || process.env.TELEGRAM_CHAT_ID || ''
+      ).trim();
       const allDestChatIds = Array.from(
         new Set([
           configuredUploadChat,
