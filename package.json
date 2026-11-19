@@ -1,0 +1,26 @@
+{
+  "name": "telegram-bot-only",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone Telegram Video Downloader & 2GB MTProto Userbot (Login, Scan, Download, Upload Only)",
+  "scripts": {
+    "dev": "tsx bot.ts",
+    "start": "tsx bot.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@google/genai": "^1.29.0",
+    "cheerio": "^1.2.0",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "telegram": "^2.26.22",
+    "undici": "^7.16.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.14.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.8.2"
+  }
+}

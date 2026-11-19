@@ -1,0 +1,12 @@
+node_modules/
+.env
+.env.local
+downloads/
+*.log
+bot-config.json
+jobs-state.json
+completed-videos.json
+course-progress.json
+course-cache.json
+watched-courses.json
+rojgar-admin-config.json
