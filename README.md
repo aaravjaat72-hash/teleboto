@@ -8,6 +8,7 @@ Is package mein **sirf Telegram Bot** ka complete code hai — koi frontend webs
 - **Turbo Download**: Multi-threaded HLS segment downloader, AES-128 decrypt, FFmpeg fast MP4 remux, PDF notes download, queue/pause/resume/skip/only controls.
 - **Turbo Upload**: Telegram Bot API (`<=50MB` HTTP/2) + 12/24-socket MTProto GramJS Userbot (`50MB - 2GB+`) auto routing, captions, thumbnails, aur live progress updates.
 - **Main Admin Access Control**: `MAIN_ADMIN_ID` se owner account configure hota hai. Owner/Admin `/admin`, `/users`, `/approve`, `/revoke`, `/newcode`, `/invite`, `/addadmin` aur `/adddev` commands se user access aur rotating codes manage kar sakte hain.
+- **Separate Userbot Upload Route**: `TELEGRAM_UPLOAD_CHAT_ID` mein shared group/channel ka numeric ID set karke large MTProto files ko requester ke personal DM ke bajay us destination par deliver kiya ja sakta hai. Bot aur alternate Userbot dono ko wahan add karein.
 - **24/7 Keep-Alive**: Minimal `/`, `/health`, `/api/ping` endpoints included so Render/Docker/UptimeRobot can keep the bot online 24/7.
 
 ## Quick Start (Local / VPS)
@@ -22,5 +23,6 @@ Is package mein **sirf Telegram Bot** ka complete code hai — koi frontend webs
 ## Deploy on Render / Docker
 - Is folder ko apne naye GitHub repo mein push karein aur Render par **Web Service (Docker)** select karein (`Dockerfile` aur `render.yaml` ready hain).
 - Render Environment Variables mein `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_API_ID`, `TELEGRAM_API_HASH`, `TELEGRAM_STRING_SESSION`, aur apne Telegram numeric ID ke saath `MAIN_ADMIN_ID` set karein.
+- Different Userbot account use kar rahe hain to shared group/channel ka ID `TELEGRAM_UPLOAD_CHAT_ID` mein set karein, usually format `-100xxxxxxxxxx` hota hai.
 - Free 2-vCPU host par optional tuning: `TURBO_HLS_WORKERS=32`, `TURBO_RANGE_WORKERS=24`, `TURBO_UPLOAD_SOCKETS=8`. Ye bounded settings hain; actual speed source CDN, host bandwidth aur Telegram route par depend karegi.
 - Health Check Path: `/api/ping`

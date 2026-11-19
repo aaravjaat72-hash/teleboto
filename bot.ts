@@ -11077,8 +11077,17 @@ async function processDownloadJob(job: DownloadJob, preDownloadOnly = false): Pr
     const runTelegramPhase = async () => {
       if (!needsTelegram || !job.filePath || job.deliveredToTelegram) return;
       const backupIds = enabledBackups.map((b) => b.chatId.trim());
+      // A separate upload destination lets a different Userbot account send
+      // large files to a shared group/channel instead of resolving the
+      // requester's personal numeric peer (which may lack an access_hash).
+      const configuredUploadChat = (process.env.TELEGRAM_UPLOAD_CHAT_ID || '').trim();
       const allDestChatIds = Array.from(
-        new Set([targetChat.startsWith('__') ? '' : targetChat, routedChannelId, ...backupIds].filter(Boolean))
+        new Set([
+          configuredUploadChat,
+          targetChat.startsWith('__') ? '' : targetChat,
+          routedChannelId,
+          ...backupIds,
+        ].filter(Boolean))
       );
 
       if (allDestChatIds.length === 0) {
