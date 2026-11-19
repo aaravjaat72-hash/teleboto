@@ -9663,8 +9663,53 @@ async function uploadToTelegramUserbotMtproto(
           }
         }
 
+        // Numeric IDs alone may not include Telegram's access_hash. Hydrate
+        // recent Userbot dialogs and retry the matching entity before failing.
         if (!inputEntity) {
-          lastPeerError = `Could not resolve MTProto entity for peer ${peerId}`;
+          try {
+            const dialogs = await withTimeoutPromise(
+              client.getDialogs({ limit: 200 }),
+              12000,
+              'MTProto dialog warmup'
+            );
+            const wantedId = String(peerId).replace(/^-100/, '').replace(/^-/, '');
+            const matchingDialog = (dialogs as any[]).find((dialog: any) => {
+              const entity = dialog?.entity;
+              const entityId = entity?.id != null ? String(entity.id) : '';
+              return entity && (entityId === wantedId || String(dialog?.id || '') === String(peerId));
+            });
+            if (matchingDialog?.entity) {
+              inputEntity = await withTimeoutPromise(
+                client.getInputEntity(matchingDialog.entity),
+                8000,
+                'MTProto dialog entity resolve'
+              );
+            }
+          } catch {
+            // Keep the normal peer error below.
+          }
+        }
+
+        // A logged-in Userbot can always resolve its own `me` peer.
+        if (!inputEntity && /^\d+$/.test(peerId)) {
+          try {
+            const me = await withTimeoutPromise(client.getMe(), 8000, 'MTProto getMe');
+            if (me?.id != null && String(me.id) === peerId) {
+              inputEntity = await withTimeoutPromise(
+                client.getInputEntity('me'),
+                8000,
+                'MTProto self entity resolve'
+              );
+            }
+          } catch {
+            // Keep the actionable peer error below.
+          }
+        }
+
+        if (!inputEntity) {
+          lastPeerError =
+            `Could not resolve MTProto entity for peer ${peerId}. ` +
+            `Userbot ko is user/chat se pehle message karvao, ya Userbot ko target channel/group mein member/admin add karo.`;
           addBotLog('USERBOT_MTPROTO', peerId, lastPeerError);
           continue;
         }
