@@ -9033,6 +9033,7 @@ const BOT_COMMANDS_LIST = [
   { command: 'queue', description: '📊 Check Active Download Queue & Speed' },
   { command: 'start', description: '⚡ Bot Status & Quick Start Menu' },
   { command: 'help', description: 'ℹ️ Full Commands & Usage Guide' },
+  { command: 'scanapi', description: '🔎 Scan authorized batch metadata without downloading videos' },
 ];
 
 async function registerTelegramBotMenu(token: string) {
@@ -14427,6 +14428,79 @@ async function pollTelegramBotUpdates() {
         // ====================================================================
         // ADMIN, DEVELOPER, USER ACCESS & BUG BOUNTY COMMANDS
         // ====================================================================
+        if (baseCmd === '/scanapi') {
+          const scanUrl = text.replace(/^\/scanapi(?:@\S+)?/i, '').trim();
+          if (!/^https?:\/\//i.test(scanUrl)) {
+            await sendTelegramTextMessage(
+              chatId,
+              'Usage: `/scanapi https://your-authorized-portal.example/course/...`\n\n' +
+                'Ye command metadata/stream count scan karega; video download ya Telegram upload nahi karega.'
+            );
+            continue;
+          }
+
+          const scanMsgId = await sendTelegramTextMessage(
+            chatId,
+            '🔎 Authorized batch metadata scan start ho raha hai… video download/upload nahi hoga.'
+          );
+          try {
+            const extracted = await inspectUrlAndExtractStreams(
+              scanUrl,
+              undefined,
+              undefined,
+              true,
+              (progressText) => {
+                editTelegramTextMessage(chatId, scanMsgId, progressText).catch(() => {});
+              },
+              undefined,
+              chatId
+            );
+            const sourceHosts = Array.from(
+              new Set(
+                extracted.streams.map((stream) => {
+                  if (stream.url.startsWith('appx://')) return 'portal internal stream reference';
+                  try {
+                    const parsed = new URL(stream.url);
+                    return `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+                  } catch {
+                    return stream.protocol || 'unknown stream reference';
+                  }
+                })
+              )
+            ).slice(0, 12);
+            const protocolCounts = new Map<string, number>();
+            for (const stream of extracted.streams) {
+              const key = stream.protocol || 'UNKNOWN';
+              protocolCounts.set(key, (protocolCounts.get(key) || 0) + 1);
+            }
+            const protocolSummary = Array.from(protocolCounts.entries())
+              .map(([protocol, count]) => `${protocol}: ${count}`)
+              .join(', ') || 'None';
+            const notes = extracted.notes.slice(-5).map((note) => `• ${note.slice(0, 180)}`).join('\n');
+            const report =
+              `✅ **API-only Metadata Scan Complete**\n` +
+              `━━━━━━━━━━━━━━━━━━━━━━\n` +
+              `📚 Title: ${extracted.pageTitle || 'Unknown'}\n` +
+              `📁 Folders: ${extracted.folders.length}\n` +
+              `🎬 Streams found: ${extracted.streams.length}\n` +
+              `📄 Pages scanned: ${extracted.pagesScanned || 1}\n` +
+              `🧩 Protocols: ${protocolSummary}\n` +
+              `🌐 Safe source references:\n${sourceHosts.map((host) => `• ${host}`).join('\n') || '• None'}\n\n` +
+              (notes ? `📝 Notes:\n${notes}\n\n` : '') +
+              `⛔ Download started: **No**\n` +
+              `⛔ Telegram upload started: **No**\n\n` +
+              `🔐 Tokens, cookies, authorization headers aur signed query parameters intentionally hide kiye gaye hain.`;
+            await editTelegramTextMessage(chatId, scanMsgId, report);
+          } catch (scanErr: any) {
+            await editTelegramTextMessage(
+              chatId,
+              scanMsgId,
+              `❌ Metadata scan failed: ${String(scanErr?.message || 'Unknown error').slice(0, 500)}`
+            );
+          }
+          continue;
+        }
+
         if (baseCmd === '/admin') {
           if (!isAdminOrDev(chatId, senderId)) {
             await sendTelegramTextMessage(chatId, `🚫 Access Denied. Only Main Admin (${MAIN_ADMIN_ID}), Admins, or Developers can open /admin.`);
