@@ -3005,11 +3005,11 @@ function envInt(name: string, fallback: number, min: number, max: number): numbe
   return Number.isFinite(parsed) ? Math.min(max, Math.max(min, parsed)) : fallback;
 }
 
-// These defaults are intentionally moderate for free 2-vCPU hosts. They can
-// be raised from Render/OCI environment variables without editing the bot.
-const CONFIGURED_HLS_WORKERS = envInt('TURBO_HLS_WORKERS', IS_CONSTRAINED_HOST ? 32 : 40, 4, 64);
-const CONFIGURED_RANGE_WORKERS = envInt('TURBO_RANGE_WORKERS', IS_CONSTRAINED_HOST ? 24 : 32, 4, 48);
-const CONFIGURED_UPLOAD_SOCKETS = envInt('TURBO_UPLOAD_SOCKETS', IS_CONSTRAINED_HOST ? 8 : 12, 2, 12);
+// Adaptive defaults: constrained free hosts stay bounded, while a real VPS
+// can use the higher-throughput 64/96-worker and 16-socket pipeline.
+const CONFIGURED_HLS_WORKERS = envInt('TURBO_HLS_WORKERS', IS_CONSTRAINED_HOST ? 32 : 64, 4, 96);
+const CONFIGURED_RANGE_WORKERS = envInt('TURBO_RANGE_WORKERS', IS_CONSTRAINED_HOST ? 24 : 64, 4, 96);
+const CONFIGURED_UPLOAD_SOCKETS = envInt('TURBO_UPLOAD_SOCKETS', IS_CONSTRAINED_HOST ? 6 : 16, 2, 16);
 
 function buildHeaders(customHeaders?: Record<string, string>, refererUrl?: string): Record<string, string> {
   const headers: Record<string, string> = {
@@ -9445,7 +9445,7 @@ async function uploadToTelegramBotApi(
   }
 }
 
-// Custom 12-Socket Multi-Sender 48-Worker Pipelined TCP_NODELAY MTProto File Uploader (35-65 MB/s Sustained Speed!)
+// Adaptive Multi-Sender 96-Worker Pipelined TCP_NODELAY MTProto File Uploader.
 // Stripes SaveBigFilePart chunks across up to 12 parallel TCP_NODELAY MTProtoSender sockets per API client without _borrowExportedSender's 30s idle timer.
 async function fastMtprotoUploadFile(
   client: TelegramClient,
@@ -9460,25 +9460,44 @@ async function fastMtprotoUploadFile(
   const partSize = isLarge ? 524288 : 524288;
   const partCount = Math.max(1, Math.ceil(fileSize / partSize));
   const fileId = readBigIntFromBuffer(generateRandomBytes(8), true, true);
-  // Balanced multi-socket pipelined MTProto uploader (4-8 sockets x 4 pipelined 512KB parts = max Telegram DC speed without FloodWait or CPU thrashing)
+  // Bizy-style adaptive pipeline: up to 16 sockets x 6 parts, bounded on
+  // constrained hosts to avoid turning extra concurrency into FloodWaits.
   const desiredSockets = Math.min(
     CONFIGURED_UPLOAD_SOCKETS,
     fileSize > 20 * 1024 * 1024 ? CONFIGURED_UPLOAD_SOCKETS : isLarge ? 6 : 2
   );
-  const workerCount = Math.min(desiredSockets * 4, partCount);
+  const workerCount = Math.min(
+    desiredSockets * 6,
+    IS_CONSTRAINED_HOST ? 36 : 96,
+    partCount
+  );
   const sessionDc = (client.session as any).dcId;
 
   let senderPool = await getTurboMtprotoSenderPool(client, sessionDc, desiredSockets);
   let lastProgressEmitMs = 0;
+  const inFlightBySender = new WeakMap<any, number>();
 
   const pickSenderForPart = async (partIdx: number, attempt: number): Promise<any> => {
     const alive = senderPool.filter((s) => isMtprotoSenderHealthy(s, sessionDc));
     if (alive.length > 0) {
-      // On retry attempts (attempt > 0), prefer mainSender (index 0) or next healthy socket
+      // On retries prefer the main sender; on first attempts select the
+      // least-loaded healthy socket so a slow TCP connection cannot become a
+      // bottleneck while faster sockets sit idle.
       if (attempt >= 2 && isMtprotoSenderHealthy(alive[0], sessionDc)) {
         return alive[0];
       }
-      return alive[(partIdx + attempt) % alive.length];
+      let best = alive[(partIdx + attempt) % alive.length];
+      let bestLoad = inFlightBySender.get(best) || 0;
+      for (let i = 0; i < alive.length; i++) {
+        const candidate = alive[(partIdx + i) % alive.length];
+        const load = inFlightBySender.get(candidate) || 0;
+        if (load < bestLoad) {
+          best = candidate;
+          bestLoad = load;
+          if (bestLoad === 0) break;
+        }
+      }
+      return best;
     }
     senderPool = await getTurboMtprotoSenderPool(client, sessionDc, 1);
     return senderPool[0];
@@ -9523,24 +9542,29 @@ async function fastMtprotoUploadFile(
           let sender: any;
           try {
             sender = await pickSenderForPart(partIdx, attempt);
-            await withTimeoutPromise(
-              sender.send(
-                isLarge
-                  ? new Api.upload.SaveBigFilePart({
-                      fileId,
-                      filePart: partIdx,
-                      fileTotalParts: partCount,
-                      bytes: finalBuf,
-                    })
-                  : new Api.upload.SaveFilePart({
-                      fileId,
-                      filePart: partIdx,
-                      bytes: finalBuf,
-                    })
-              ),
-              35000,
-              `MTProto part #${partIdx}`
-            );
+            inFlightBySender.set(sender, (inFlightBySender.get(sender) || 0) + 1);
+            try {
+              await withTimeoutPromise(
+                sender.send(
+                  isLarge
+                    ? new Api.upload.SaveBigFilePart({
+                        fileId,
+                        filePart: partIdx,
+                        fileTotalParts: partCount,
+                        bytes: finalBuf,
+                      })
+                    : new Api.upload.SaveFilePart({
+                        fileId,
+                        filePart: partIdx,
+                        bytes: finalBuf,
+                      })
+                ),
+                45000,
+                `MTProto part #${partIdx}`
+              );
+            } finally {
+              inFlightBySender.set(sender, Math.max(0, (inFlightBySender.get(sender) || 1) - 1));
+            }
             lastMtprotoHealthCheckAt = Date.now();
             sent = true;
             break;
